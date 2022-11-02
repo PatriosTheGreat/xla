@@ -276,6 +276,18 @@ class PjRtCApiClient : public PjRtClient {
     return it->second;
   }
 
+  // TODO(b/267063498) return the PjRtHostMemoryForDeviceManager for the wrapped
+  // client. Returns nullptr if `kPjRtCApiBypass` is not set, until the C API
+  // device manager is implemented.
+  PjRtHostMemoryForDeviceManager* GetPjRtHostMemoryForDeviceManager()
+      const override {
+    if (true) {  // kPjRtCApiBypass
+      VLOG(1) << "PJRT C API BYPASS: GetPjRtHostMemoryForDeviceManager";
+      return wrapped_->GetPjRtHostMemoryForDeviceManager();
+    }
+    return nullptr;
+  }
+
  private:
   void InitDevices();
 
@@ -535,7 +547,28 @@ class PjRtCApiLoadedExecutable : public PjRtLoadedExecutable {
     return loaded_executable_.get();
   }
 
+  // True if the `returned_futures` output parameter is supported in the
+  // Execute*() methods.
+  bool IsReturnedFutureSupported() const override { return true; }
+
+  // std::function version of PJRT_SendCallback
+  typedef std::function<bool(PJRT_TransferMetadata*, PJRT_Chunk*, size_t, bool)>
+      SendCallbackFunction;
+  // std::function version of PJRT_RecvCallback
+  typedef std::function<void(PJRT_TransferMetadata*, PJRT_CopyToDeviceStream*)>
+      RecvCallbackFunction;
+
  private:
+  // Groups data needed to support send/recv execution callbacks.
+  struct SendRecvCallbackData {
+    std::vector<std::vector<PJRT_SendCallbackInfo>> c_send_callbacks;
+    std::vector<PJRT_SendCallbackInfo*> c_send_callback_lists;
+    std::vector<std::vector<PJRT_RecvCallbackInfo>> c_recv_callbacks;
+    std::vector<PJRT_RecvCallbackInfo*> c_recv_callback_lists;
+    std::vector<std::vector<SendCallbackFunction>> send_callback_functions;
+    std::vector<std::vector<RecvCallbackFunction>> recv_callback_functions;
+  };
+
   // Gets common Execute_Args between Execute, ExecuteSharded and
   // ExecutePortable. device_complete_events in the return is set if the input
   // device_complete_events has value.
@@ -546,7 +579,8 @@ class PjRtCApiLoadedExecutable : public PjRtLoadedExecutable {
       std::vector<PJRT_Buffer**>& c_arguments,
       std::vector<std::vector<PJRT_Buffer*>>& c_output_lists_storage,
       std::vector<PJRT_Buffer**>& c_output_lists,
-      std::optional<std::vector<PJRT_Event*>>& device_complete_events);
+      std::optional<std::vector<PJRT_Event*>>& device_complete_events,
+      SendRecvCallbackData& send_recv_callback_data);
 
   StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> ExecuteWithSingleDevice(
       absl::Span<PjRtBuffer* const> argument_handles, PjRtDevice* device,

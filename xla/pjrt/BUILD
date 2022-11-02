@@ -657,7 +657,6 @@ cc_library(
         "//xla/pjrt/c:pjrt_c_api_wrapper_impl",  # TODO(skyewm): remove
         "//xla/service:hlo_proto_cc",
         "//xla/stream_executor/tpu:c_api_conversions",  # TODO(b/238999986): Remove this.
-        "//xla/stream_executor/tpu:tpu_initializer_helper",
         "@com_google_absl//absl/strings",
         "@llvm-project//mlir:BytecodeWriter",
         "@tsl//tsl/platform:status",

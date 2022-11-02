@@ -42,7 +42,10 @@ cc_library(
         "//xla/pjrt:pjrt_future",
         "//xla/service:hlo_proto_cc",
         "//xla/stream_executor/tpu:c_api_conversions",  # TODO(b/238999986): Remove this.
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:source_location",
+        "@tsl//tsl/platform:errors",
     ],
 )
 

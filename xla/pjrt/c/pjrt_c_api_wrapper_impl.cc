@@ -16,16 +16,21 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/source_location.h"
 #include "xla/client/xla_computation.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/literal.h"
@@ -44,6 +49,7 @@ limitations under the License.
 // TODO(b/238999986): Remove this.
 #include "xla/stream_executor/tpu/c_api_conversions.h"
 #include "xla/util.h"
+#include "tsl/platform/errors.h"
 
 namespace pjrt {
 
@@ -638,6 +644,80 @@ PJRT_Error* PJRT_LoadedExecutable_IsDeleted(
   return nullptr;
 }
 
+static xla::SendCallback ConvertCCallbackToCppSendCallback(
+    const PJRT_SendCallbackInfo& c_callback) {
+  return xla::SendCallback{
+      c_callback.channel_id,
+      [user_arg = c_callback.user_arg, callback = c_callback.send_callback](
+          const xla::PjRtTransferMetadata& metadata, xla::PjRtChunk input,
+          size_t total_size_in_bytes, bool done) -> xla::Status {
+        Int64List c_dimensions;
+        ApiConverter::CreateVector(metadata.device_shape.dimensions(),
+                                   &c_dimensions);
+        PJRT_TransferMetadata c_metadata{metadata.device_shape};
+        PJRT_Chunk c_chunk{std::move(input)};
+
+        // TODO(b/267255088) retrieve up the callback error message.
+        bool success = callback(&c_metadata, &c_chunk, total_size_in_bytes,
+                                done, user_arg);
+        if (success) {
+          return tsl::OkStatus();
+        }
+        return xla::Status(tsl::error::UNKNOWN,
+                           "PJRT_SendCallback returned false (error).",
+                           absl::SourceLocation::current());
+      }};
+}
+
+// TODO(yeounoh) Create new libtpu C++ callbacks that does the following:
+// - convert libtpu PjRtTransferMetadata to PJRT_TransferMetadata, etc.
+// - call C API callback with the converted arguments
+static std::vector<std::vector<xla::SendCallback>>
+Convert2DCCallbacksToCppSendCallbacks(PJRT_SendCallbackInfo** c_lists,
+                                      size_t outer_size, size_t inner_size) {
+  std::vector<std::vector<xla::SendCallback>> cpp_lists;
+  cpp_lists.reserve(outer_size);
+  for (int i = 0; i < outer_size; ++i) {
+    std::vector<xla::SendCallback>& cpp_list = cpp_lists.emplace_back();
+    cpp_list.reserve(inner_size);
+    for (int j = 0; j < inner_size; ++j) {
+      cpp_list.push_back(ConvertCCallbackToCppSendCallback(c_lists[i][j]));
+    }
+  }
+  return cpp_lists;
+}
+
+static xla::RecvCallback ConvertCCallbackToCppRecvCallback(
+    const PJRT_RecvCallbackInfo& c_callback) {
+  return xla::RecvCallback{
+      c_callback.channel_id,
+      [user_arg = c_callback.user_arg, callback = c_callback.recv_callback](
+          const xla::PjRtTransferMetadata& metadata,
+          std::unique_ptr<xla::CopyToDeviceStream> stream) {
+        Int64List c_dimensions;
+        ApiConverter::CreateVector(metadata.device_shape.dimensions(),
+                                   &c_dimensions);
+        PJRT_TransferMetadata c_metadata{metadata.device_shape};
+        PJRT_CopyToDeviceStream c_stream{std::move(stream)};
+        callback(&c_metadata, &c_stream, user_arg);
+      }};
+}
+
+static std::vector<std::vector<xla::RecvCallback>>
+Convert2DCCallbacksToCppRecvCallbacks(PJRT_RecvCallbackInfo** c_lists,
+                                      size_t outer_size, size_t inner_size) {
+  std::vector<std::vector<xla::RecvCallback>> cpp_lists;
+  cpp_lists.reserve(outer_size);
+  for (int i = 0; i < outer_size; ++i) {
+    auto& cpp_list = cpp_lists.emplace_back();
+    cpp_list.reserve(inner_size);
+    for (int j = 0; j < inner_size; ++j) {
+      cpp_list.push_back(ConvertCCallbackToCppRecvCallback(c_lists[i][j]));
+    }
+  }
+  return cpp_lists;
+}
+
 static std::vector<std::vector<xla::PjRtBuffer*>> Convert2DCBuffersToCppBuffers(
     PJRT_Buffer*** c_lists, size_t outer_size, size_t inner_size) {
   std::vector<std::vector<xla::PjRtBuffer*>> cpp_lists;
@@ -667,26 +747,74 @@ PJRT_Error* PJRT_LoadedExecutable_Execute(
   options.untuple_result = true;
   options.context = nullptr;
   options.multi_slice_config = nullptr;
+
   std::vector<std::vector<xla::PjRtBuffer*>> cpp_argument_lists =
       Convert2DCBuffersToCppBuffers(args->argument_lists, args->num_devices,
                                     args->num_args);
 
+  // Set send/recv callbacks in ExecuteOptions. The callbacks
+  // should call the C callbacks provided by the caller.
+  std::vector<std::vector<xla::SendCallback>> cpp_send_callbacks;
+  if (args->options->num_send_ops > 0) {
+    cpp_send_callbacks = Convert2DCCallbacksToCppSendCallbacks(
+        args->options->send_callbacks, args->num_devices,
+        args->options->num_send_ops);
+    options.send_callbacks = cpp_send_callbacks;
+  }
+
+  std::vector<std::vector<xla::RecvCallback>> cpp_recv_callbacks;
+  if (args->options->num_recv_ops > 0) {
+    cpp_recv_callbacks = Convert2DCCallbacksToCppRecvCallbacks(
+        args->options->recv_callbacks, args->num_devices,
+        args->options->num_recv_ops);
+    options.recv_callbacks = cpp_recv_callbacks;
+  }
+
   if (args->execute_device == nullptr) {
     std::vector<std::vector<std::unique_ptr<xla::PjRtBuffer>>> cpp_buffer_lists;
-    if (args->device_complete_events != nullptr) {
+    if (args->device_complete_events != nullptr ||
+        !cpp_send_callbacks.empty() || !cpp_recv_callbacks.empty()) {
       std::optional<std::vector<xla::PjRtFuture<xla::Status>>> returned_futures;
       returned_futures.emplace();
       PJRT_ASSIGN_OR_RETURN(cpp_buffer_lists,
                             args->executable->get()->Execute(
                                 cpp_argument_lists, options, returned_futures));
-      for (int i = 0; i < returned_futures->size(); ++i) {
-        args->device_complete_events[i] =
-            new PJRT_Event{std::move((*returned_futures)[i])};
+      CHECK_EQ(returned_futures->size(), args->num_devices);
+
+      // We assume that these OnReady callbacks will fire even if
+      // returned_futures is destroyed first. This is true for the
+      // AsyncValue-based implementation of PjRtFuture.
+      if (!cpp_send_callbacks.empty()) {
+        CHECK_EQ(returned_futures->size(), cpp_send_callbacks.size());
+        for (int i = 0; i < returned_futures->size(); ++i) {
+          (*returned_futures)[i].OnReady(
+              [send_callback =
+                   std::move(cpp_send_callbacks[i])](xla::Status status) {
+                // Keeps C++ callbacks alive until execution completes.
+              });
+        }
+      }
+      if (!cpp_recv_callbacks.empty()) {
+        CHECK_EQ(returned_futures->size(), cpp_recv_callbacks.size());
+        for (int i = 0; i < returned_futures->size(); ++i) {
+          (*returned_futures)[i].OnReady(
+              [recv_callback =
+                   std::move(cpp_recv_callbacks[i])](xla::Status status) {
+                // Keeps C++ callbacks alive until execution completes.
+              });
+        }
+      }
+      if (args->device_complete_events != nullptr) {
+        for (int i = 0; i < returned_futures->size(); ++i) {
+          args->device_complete_events[i] =
+              new PJRT_Event{std::move((*returned_futures)[i])};
+        }
       }
     } else {
       PJRT_ASSIGN_OR_RETURN(cpp_buffer_lists, args->executable->get()->Execute(
                                                   cpp_argument_lists, options));
     }
+
     for (int i = 0; i < cpp_buffer_lists.size(); ++i) {
       for (int j = 0; j < cpp_buffer_lists[i].size(); ++j) {
         args->output_lists[i][j] = new PJRT_Buffer{
@@ -702,6 +830,12 @@ PJRT_Error* PJRT_LoadedExecutable_Execute(
           "num_devices=%i",
           args->num_devices)};
     }
+    if (!cpp_send_callbacks.empty() || !cpp_recv_callbacks.empty()) {
+      return new PJRT_Error{xla::Unimplemented(
+          "PJRT_Executable_Execute doesn't support using send/recv callbacks "
+          "with `execute_device`.")};
+    }
+
     std::vector<std::unique_ptr<xla::PjRtBuffer>> cpp_buffer_list;
     std::optional<xla::PjRtFuture<xla::Status>> returned_future;
     bool fill_future = args->device_complete_events != nullptr;

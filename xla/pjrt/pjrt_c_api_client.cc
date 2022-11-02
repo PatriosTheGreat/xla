@@ -36,7 +36,6 @@ limitations under the License.
 #include "xla/service/hlo.pb.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/tpu/tpu_initializer_helper.h"  // NOLINT(unused-includes): required for tensorflow::tpu::FindAndLoadTpuLibrary
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/status.h"
@@ -45,6 +44,8 @@ limitations under the License.
 #include "xla/stream_executor/tpu/c_api_conversions.h"
 
 namespace xla {
+using xla::Status;
+
 bool kPjRtCApiBypass = false;
 
 // Helper macros
@@ -719,6 +720,123 @@ Convert2DCBuffersToCppBuffers(PJRT_Buffer*** c_lists, size_t outer_size,
   return ret;
 }
 
+// Wraps original `xla::SendCallback` inside `PJRT_Callback` using
+// 1) void* `args` to capture `cpp_send_callback.callback` (std::function)
+// 2) `PJRT_SendCallback` function pointer, which reinterprets and calls `args`
+// to call `cpp_send_callback.callback` function.
+//
+// TODO(yeounoh) move this to pjrt_c_api_helpers after implementing C API for
+// the opaque types `PJRT_Chunk` and `PJRT_CopyToDeviceStream`.
+PJRT_SendCallbackInfo CppSendCallbackToCSendCallback(
+    const xla::SendCallback& cpp_send_callback,
+    std::vector<PjRtCApiLoadedExecutable::SendCallbackFunction>&
+        send_callback_functions) {
+  send_callback_functions.emplace_back(
+      [&send_callback = cpp_send_callback.callback](
+          PJRT_TransferMetadata* metadata, PJRT_Chunk* chunk,
+          size_t total_size_in_bytes, bool done) -> bool {
+        // TODO(b/238999986) use `shape` with full information when available.
+        xla::Shape shape = metadata->device_shape;
+        xla::Status status = send_callback(
+            xla::PjRtTransferMetadata{shape},
+            // TODO(b/263390038) use PJRT_Chunk C API
+            // instead of accessing the opaque type's field directly.
+            xla::PjRtChunk(std::move(chunk->chunk)), total_size_in_bytes, done);
+        if (!status.ok()) {
+          return false;
+        }
+        return true;
+      });
+  return PJRT_SendCallbackInfo{
+      /*channel_id=*/cpp_send_callback.channel_id,
+      /*user_arg=*/&send_callback_functions.back(),
+      /*send_callback=*/
+      [](PJRT_TransferMetadata* metadata, PJRT_Chunk* chunk,
+         size_t total_size_in_bytes, bool done, void* user_arg) -> bool {
+        PjRtCApiLoadedExecutable::SendCallbackFunction* send_callback =
+            reinterpret_cast<PjRtCApiLoadedExecutable::SendCallbackFunction*>(
+                user_arg);
+        return (*send_callback)(metadata, chunk, total_size_in_bytes, done);
+      }};
+}
+
+// Wraps original `xla::RecvCallback` inside `PJRT_Callback`.
+//
+// TODO(yeounoh) move this to pjrt_c_api_helpers after implementing C API for
+// the opaque types `PJRT_Chunk` and `PJRT_CopyToDeviceStream`.
+PJRT_RecvCallbackInfo CppRecvCallbackToCRecvCallback(
+    const xla::RecvCallback& cpp_recv_callback,
+    std::vector<PjRtCApiLoadedExecutable::RecvCallbackFunction>&
+        recv_callback_functions) {
+  recv_callback_functions.emplace_back(
+      [&recv_callback = cpp_recv_callback.callback](
+          PJRT_TransferMetadata* metadata, PJRT_CopyToDeviceStream* stream) {
+        // TODO(b/238999986) use `shape` with full information when available.
+        xla::Shape shape = metadata->device_shape;
+        recv_callback(xla::PjRtTransferMetadata{shape},
+                      // TODO(b/263390934) use PJRT_CopyToDeviceStream C API
+                      // instead of accessing the opaque type's field directly.
+                      std::move(stream->stream));
+      });
+  return PJRT_RecvCallbackInfo{
+      /*channel_id=*/cpp_recv_callback.channel_id,
+      /*user_arg=*/&recv_callback_functions.back(),
+      /*recv_callback=*/
+      [](PJRT_TransferMetadata* metadata, PJRT_CopyToDeviceStream* stream,
+         void* user_arg) {
+        PjRtCApiLoadedExecutable::RecvCallbackFunction* recv_callback =
+            reinterpret_cast<PjRtCApiLoadedExecutable::RecvCallbackFunction*>(
+                user_arg);
+        (*recv_callback)(metadata, stream);
+      }};
+}
+
+static std::vector<std::vector<PJRT_SendCallbackInfo>>
+Convert2DCppSendCallbacksToCCallbacks(
+    absl::Span<const std::vector<xla::SendCallback>> cpp_lists,
+    std::vector<std::vector<PjRtCApiLoadedExecutable::SendCallbackFunction>>&
+        send_callback_functions) {
+  std::vector<std::vector<PJRT_SendCallbackInfo>> c_lists;
+  c_lists.reserve(cpp_lists.size());
+  send_callback_functions.reserve(cpp_lists.size());
+  for (const std::vector<xla::SendCallback>& cpp_list : cpp_lists) {
+    std::vector<PJRT_SendCallbackInfo>& c_list = c_lists.emplace_back();
+    c_list.reserve(cpp_list.size());
+    std::vector<PjRtCApiLoadedExecutable::SendCallbackFunction>&
+        per_device_send_callback_functions =
+            send_callback_functions.emplace_back();
+    per_device_send_callback_functions.reserve(cpp_list.size());
+    for (const xla::SendCallback& cpp_callback : cpp_list) {
+      c_list.push_back(CppSendCallbackToCSendCallback(
+          cpp_callback, per_device_send_callback_functions));
+    }
+  }
+  return c_lists;
+}
+
+static std::vector<std::vector<PJRT_RecvCallbackInfo>>
+Convert2DCppRecvCallbacksToCCallbacks(
+    absl::Span<const std::vector<xla::RecvCallback>> cpp_lists,
+    std::vector<std::vector<PjRtCApiLoadedExecutable::RecvCallbackFunction>>&
+        recv_callback_functions) {
+  std::vector<std::vector<PJRT_RecvCallbackInfo>> c_lists;
+  c_lists.reserve(cpp_lists.size());
+  recv_callback_functions.reserve(cpp_lists.size());
+  for (const auto& cpp_list : cpp_lists) {
+    std::vector<PJRT_RecvCallbackInfo>& c_list = c_lists.emplace_back();
+    c_list.reserve(cpp_list.size());
+    std::vector<PjRtCApiLoadedExecutable::RecvCallbackFunction>&
+        per_device_recv_callback_functions =
+            recv_callback_functions.emplace_back();
+    per_device_recv_callback_functions.reserve(cpp_list.size());
+    for (const auto& cpp_callback : cpp_list) {
+      c_list.push_back(CppRecvCallbackToCRecvCallback(
+          cpp_callback, per_device_recv_callback_functions));
+    }
+  }
+  return c_lists;
+}
+
 xla::StatusOr<PJRT_LoadedExecutable_Execute_Args>
 PjRtCApiLoadedExecutable::GetCommonExecuteArgs(
     absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
@@ -727,7 +845,8 @@ PjRtCApiLoadedExecutable::GetCommonExecuteArgs(
     std::vector<PJRT_Buffer**>& c_arguments,
     std::vector<std::vector<PJRT_Buffer*>>& c_output_lists_storage,
     std::vector<PJRT_Buffer**>& c_output_lists,
-    std::optional<std::vector<PJRT_Event*>>& device_complete_events) {
+    std::optional<std::vector<PJRT_Event*>>& device_complete_events,
+    SendRecvCallbackData& callback_data) {
   PJRT_LoadedExecutable_Execute_Args args;
   args.struct_size = PJRT_LoadedExecutable_Execute_Args_STRUCT_SIZE;
   args.priv = nullptr;
@@ -738,12 +857,14 @@ PjRtCApiLoadedExecutable::GetCommonExecuteArgs(
   args.num_devices = argument_handles.size();
   CHECK_GT(args.num_devices, 0);
   args.num_args = argument_handles[0].size();
-  if (device_complete_events.has_value()) {
+  if (device_complete_events.has_value() || !options.send_callbacks.empty() ||
+      !options.recv_callbacks.empty()) {
     device_complete_events->resize(args.num_devices);
     args.device_complete_events = device_complete_events->data();
   } else {
     args.device_complete_events = nullptr;
   }
+
   // Populates `args.argument_lists` from `argument_handles`.
   c_argument_lists_storage = Convert2DCppBuffersToCBuffers(argument_handles);
   c_arguments.reserve(c_argument_lists_storage.size());
@@ -751,6 +872,35 @@ PjRtCApiLoadedExecutable::GetCommonExecuteArgs(
     c_arguments.push_back(argument_list.data());
   }
   args.argument_lists = c_arguments.data();
+
+  // Allocates memory for callbacks. `callback_data` need to stay alive during
+  // the execution.
+  args.options->num_send_ops = 0;
+  if (!options.send_callbacks.empty()) {
+    callback_data.c_send_callbacks = Convert2DCppSendCallbacksToCCallbacks(
+        options.send_callbacks, callback_data.send_callback_functions);
+    callback_data.c_send_callbacks.reserve(
+        callback_data.c_send_callbacks.size());
+    for (auto& c_send_callback_list : callback_data.c_send_callbacks) {
+      callback_data.c_send_callback_lists.push_back(
+          c_send_callback_list.data());
+    }
+    args.options->send_callbacks = callback_data.c_send_callback_lists.data();
+    args.options->num_send_ops = options.send_callbacks[0].size();
+  }
+  args.options->num_recv_ops = 0;
+  if (!options.recv_callbacks.empty()) {
+    callback_data.c_recv_callbacks = Convert2DCppRecvCallbacksToCCallbacks(
+        options.recv_callbacks, callback_data.recv_callback_functions);
+    callback_data.c_recv_callbacks.reserve(
+        callback_data.c_recv_callbacks.size());
+    for (auto& c_recv_callback_list : callback_data.c_recv_callbacks) {
+      callback_data.c_recv_callback_lists.push_back(
+          c_recv_callback_list.data());
+    }
+    args.options->recv_callbacks = callback_data.c_recv_callback_lists.data();
+    args.options->num_recv_ops = options.recv_callbacks[0].size();
+  }
 
   // Allocates memory for output. `c_buffer_lists_storage` and `c_buffer_lists`
   // needs to stay alive during the call of `PJRT_LoadedExecutable_Execute`.
@@ -788,23 +938,39 @@ PjRtCApiLoadedExecutable::Execute(
   if (returned_futures.has_value()) {
     device_complete_events.emplace();
   }
+  auto callback_data = std::make_shared<SendRecvCallbackData>();
   TF_ASSIGN_OR_RETURN(
       PJRT_LoadedExecutable_Execute_Args args,
       GetCommonExecuteArgs(argument_handles, options, c_options,
                            c_argument_lists_storage, c_arguments,
                            c_output_lists_storage, c_output_lists,
-                           device_complete_events));
+                           device_complete_events, *callback_data));
 
   args.execute_device = nullptr;
 
   RETURN_STATUS_IF_ERROR(pjrt_c_api()->PJRT_LoadedExecutable_Execute(&args),
                          pjrt_c_api());
 
-  if (returned_futures.has_value()) {
-    returned_futures->resize(args.num_devices);
-    for (int i = 0; i < returned_futures->size(); ++i) {
-      (*returned_futures)[i] = pjrt::ConvertCEventToCppFuture(
+  if (device_complete_events.has_value()) {
+    std::vector<PjRtFuture<Status>> device_complete_futures;
+    device_complete_futures.resize(args.num_devices);
+    for (int i = 0; i < device_complete_futures.size(); ++i) {
+      device_complete_futures[i] = pjrt::ConvertCEventToCppFuture(
           args.device_complete_events[i], pjrt_c_api());
+      if (!callback_data->c_send_callbacks.empty() ||
+          !callback_data->c_recv_callbacks.empty()) {
+        device_complete_futures[i].OnReady(
+            [callbalck_data = callback_data](xla::Status status) {
+              // Keeps C callbacks alive until execution completes.
+            });
+      }
+    }
+
+    if (returned_futures.has_value()) {
+      returned_futures->resize(device_complete_futures.size());
+      for (int i = 0; i < returned_futures->size(); ++i) {
+        (*returned_futures)[i] = std::move(device_complete_futures[i]);
+      }
     }
   }
 
@@ -830,12 +996,19 @@ PjRtCApiLoadedExecutable::ExecuteWithSingleDevice(
   if (fill_future) {
     device_complete_events.emplace();
   }
+
+  if (!options.send_callbacks.empty() || !options.recv_callbacks.empty()) {
+    return Status(tensorflow::error::UNIMPLEMENTED,
+                  "Callback is not supported, yet.");
+  }
+
+  auto callback_data = std::make_shared<SendRecvCallbackData>();
   TF_ASSIGN_OR_RETURN(
       PJRT_LoadedExecutable_Execute_Args args,
       GetCommonExecuteArgs(argument_handles_vec, options, c_options,
                            c_argument_lists_storage, c_arguments,
                            c_output_lists_storage, c_output_lists,
-                           device_complete_events));
+                           device_complete_events, *callback_data));
 
   args.execute_device =
       tensorflow::down_cast<PjRtCApiDevice*>(device)->c_device();
@@ -931,10 +1104,10 @@ PjRtCApiLoadedExecutable::GetCostAnalysis() const {
       case PJRT_NamedValue::PJRT_NamedValue_kString:
         output_map[args.properties[i].name] = args.properties[i].string_value;
         break;
-      // C API client currently does not support forward compatibility (such as
-      // if the underlying PJRT library is a newer version that returns types
-      // not supported by this client). Failing here to prevent undefined
-      // behavior.
+      // C API client currently does not support forward compatibility (such
+      // as if the underlying PJRT library is a newer version that returns
+      // types not supported by this client). Failing here to prevent
+      // undefined behavior.
       default:
         LOG(FATAL)
             << "PJRT_LoadedExecutable_GetCostAnalysis() returned attribute '"
