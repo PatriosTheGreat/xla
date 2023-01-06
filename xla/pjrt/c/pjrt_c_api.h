@@ -218,6 +218,7 @@ typedef struct PJRT_Device PJRT_Device;
 typedef struct PJRT_Executable PJRT_Executable;
 typedef struct PJRT_LoadedExecutable PJRT_LoadedExecutable;
 typedef struct PJRT_Buffer PJRT_Buffer;
+typedef struct PJRT_DeviceTopology PJRT_DeviceTopology;
 
 typedef struct {
   size_t struct_size;
@@ -881,6 +882,25 @@ const size_t PJRT_Executable_DeserializeAndLoad_Args_STRUCT_SIZE =
 typedef PJRT_Error* PJRT_Executable_DeserializeAndLoad(
     PJRT_Executable_DeserializeAndLoad_Args* args);
 
+typedef struct PJRT_Executable_GetCompileOptions_Args {
+  size_t struct_size;
+  void* priv;
+  const PJRT_Executable* executable;
+  // out
+  void (*result_deleter)(
+      struct PJRT_Executable_GetCompileOptions_Args* to_cleanup);
+  void* result_scratch;
+
+  const char* compile_options;
+  size_t compile_options_size;
+} PJRT_Executable_GetCompileOptions_Args;
+const size_t PJRT_Executable_GetCompileOptions_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_Executable_GetCompileOptions_Args,
+                     compile_options_size);
+
+typedef PJRT_Error* PJRT_Executable_GetCompileOptions(
+    PJRT_Executable_GetCompileOptions_Args* args);
+
 // -------------------------- Serialized Executables ---------------------------
 
 typedef struct {
@@ -1086,6 +1106,93 @@ const size_t PJRT_Buffer_UnsafePointer_Args_STRUCT_SIZE =
 typedef PJRT_Error* PJRT_Buffer_UnsafePointer(
     PJRT_Buffer_UnsafePointer_Args* args);
 
+// ------------------------------ Device Topology ------------------------------
+
+typedef struct {
+  size_t struct_size;
+  void* priv;
+  PJRT_DeviceTopology* topology;  // out
+} PJRT_DeviceTopology_Create_Args;
+const size_t PJRT_DeviceTopology_Create_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_DeviceTopology_Create_Args, topology);
+
+// Creates and initializes a new PJRT_DeviceTopology and returns in `topology`.
+typedef PJRT_Error* PJRT_DeviceTopology_Create(
+    PJRT_DeviceTopology_Create_Args* args);
+
+typedef struct {
+  size_t struct_size;
+  void* priv;
+  PJRT_DeviceTopology* topology;
+} PJRT_DeviceTopology_Destroy_Args;
+const size_t PJRT_DeviceTopology_Destroy_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_DeviceTopology_Destroy_Args, topology);
+
+// Frees `topology`. `topology` can be nullptr.
+typedef PJRT_Error* PJRT_DeviceTopology_Destroy(
+    PJRT_DeviceTopology_Destroy_Args* args);
+
+typedef struct {
+  size_t struct_size;
+  void* priv;
+  PJRT_DeviceTopology* topology;
+  // `platform_version` has the same lifetime as `topology`. It's owned by
+  // `topology`.
+  const char* platform_version;  // out
+  size_t platform_version_size;  // out
+} PJRT_DeviceTopology_PlatformVersion_Args;
+
+const size_t PJRT_DeviceTopology_PlatformVersion_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_DeviceTopology_PlatformVersion_Args,
+                     platform_version_size);
+
+// Returns a string containing human-readable, platform-specific version info
+// (e.g. the CUDA version on GPU or libtpu version on Cloud TPU).
+typedef PJRT_Error* PJRT_DeviceTopology_PlatformVersion(
+    PJRT_DeviceTopology_PlatformVersion_Args* args);
+
+typedef struct {
+  size_t struct_size;
+  void* priv;
+  PJRT_DeviceTopology* topology;
+  // `platform_name` has the same lifetime as `topology`. It is owned by
+  // `topology`.
+  const char* platform_name;  // out
+  size_t platform_name_size;  // out
+} PJRT_DeviceTopology_PlatformName_Args;
+
+const size_t PJRT_DeviceTopology_PlatformName_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_DeviceTopology_PlatformName_Args, platform_name_size);
+
+// Returns a string that identifies the platform (e.g. "cpu", "gpu", "tpu").
+typedef PJRT_Error* PJRT_DeviceTopology_PlatformName(
+    PJRT_DeviceTopology_PlatformName_Args* args);
+
+typedef struct {
+  size_t struct_size;
+  void* priv;
+  PJRT_Client* client;  // Optionally provided for performance-guided
+                        // optimizations.
+  const PJRT_DeviceTopology* topology;
+  // Only needs to stay alive for the duration of the Compile call.
+  // `program->format` and `program->format_size` are owned by the caller.
+  PJRT_Program* program;
+  // TODO(b/240560013): consider putting some of option fields in priv.
+  // Serialized CompileOptionsProto
+  // (https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/xla/pjrt/compile_options.proto)
+  const char* compile_options;
+  size_t compile_options_size;
+  PJRT_Executable* executable;  // out
+} PJRT_DeviceTopology_Compile_Args;
+
+const size_t PJRT_DeviceTopology_Compile_Args_STRUCT_SIZE =
+    PJRT_STRUCT_SIZE(PJRT_DeviceTopology_Compile_Args, executable);
+
+// Compiles a program in specified format (such as MLIR or HLO) with given
+// `options` (aot).
+typedef PJRT_Error* PJRT_DeviceTopology_Compile(
+    PJRT_DeviceTopology_Compile_Args* args);
+
 // -------------------------------- API access ---------------------------------
 
 #define _PJRT_API_STRUCT_FIELD(fn_type) fn_type* fn_type
@@ -1132,6 +1239,7 @@ typedef struct {
   _PJRT_API_STRUCT_FIELD(PJRT_Executable_SizeOfGeneratedCodeInBytes);
   _PJRT_API_STRUCT_FIELD(PJRT_Executable_OptimizedProgram);
   _PJRT_API_STRUCT_FIELD(PJRT_Executable_Serialize);
+  _PJRT_API_STRUCT_FIELD(PJRT_Executable_GetCompileOptions);
 
   _PJRT_API_STRUCT_FIELD(PJRT_LoadedExecutable_Destroy);
   _PJRT_API_STRUCT_FIELD(PJRT_LoadedExecutable_GetExecutable);
@@ -1156,10 +1264,17 @@ typedef struct {
   _PJRT_API_STRUCT_FIELD(PJRT_Buffer_IsOnCpu);
   _PJRT_API_STRUCT_FIELD(PJRT_Buffer_ReadyEvent);
   _PJRT_API_STRUCT_FIELD(PJRT_Buffer_UnsafePointer);
+
+  _PJRT_API_STRUCT_FIELD(PJRT_DeviceTopology_Create);
+  _PJRT_API_STRUCT_FIELD(PJRT_DeviceTopology_Destroy);
+  _PJRT_API_STRUCT_FIELD(PJRT_DeviceTopology_PlatformName);
+  _PJRT_API_STRUCT_FIELD(PJRT_DeviceTopology_PlatformVersion);
+
+  _PJRT_API_STRUCT_FIELD(PJRT_DeviceTopology_Compile);
 } PJRT_Api;
 
 const size_t PJRT_Api_STRUCT_SIZE =
-    PJRT_STRUCT_SIZE(PJRT_Api, PJRT_Buffer_UnsafePointer);
+    PJRT_STRUCT_SIZE(PJRT_Api, PJRT_DeviceTopology_Compile);
 
 #undef _PJRT_API_STRUCT_FIELD
 
