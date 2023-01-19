@@ -5942,3 +5942,87 @@ func.func @normal_convolution_with_zero_sized_dimension_in_output(%arg0: tensor<
     : (tensor<3x9x0x2xi16>, tensor<4x5x2x2xi16>) -> tensor<3x9x0x2xi16>
   return %0 : tensor<3x9x0x2xi16>
 }
+
+// -----
+
+// CHECK-LABEL: func @compare_complex
+func.func @compare_complex(%a: tensor<complex<f32>>, %b: tensor<complex<f32>>)
+    -> tensor<i1> {
+// CHECK-NOT: mhlo.compare
+// CHECK:     tensor.empty()
+// CHECK:     linalg.generic
+// CHECK-NEXT:  ^bb0(%[[LHS:[^:]*]]: complex<f32>, %[[RHS:[^:]*]]: complex<f32>
+// CHECK-DAG:     %[[LHS_REAL:.*]] = complex.re %[[LHS]]
+// CHECK-DAG:     %[[RHS_REAL:.*]] = complex.re %[[RHS]]
+// CHECK-DAG:     %[[LHS_IMAG:.*]] = complex.im %[[LHS]]
+// CHECK-DAG:     %[[RHS_IMAG:.*]] = complex.im %[[RHS]]
+// CHECK-DAG:     %[[REAL_EQ:.*]] = arith.cmpf oeq, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[REAL_ORD:.*]] = arith.cmpf ogt, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[IMAG_ORD:.*]] = arith.cmpf ogt, %[[LHS_IMAG]], %[[RHS_IMAG]]
+// CHECK-DAG:     %[[OR_LHS:.*]] = arith.andi %[[REAL_EQ]], %[[IMAG_ORD]]
+// CHECK-DAG:     %[[COND:.*]] = arith.ori %[[OR_LHS]], %[[REAL_ORD]]
+// CHECK-NEXT:    linalg.yield %[[COND]] : i1
+  %result = "mhlo.compare" (%a, %b)
+      {comparison_direction = #mhlo<comparison_direction GT>}
+    : (tensor<complex<f32>>, tensor<complex<f32>>) -> tensor<i1>
+  func.return %result : tensor<i1>
+}
+
+// -----
+
+// CHECK-LABEL: func @max_complex
+func.func @max_complex(%a: tensor<complex<f32>>, %b: tensor<complex<f32>>)
+    -> tensor<complex<f32>> {
+// CHECK-NOT: mhlo.maximum
+// CHECK:     tensor.empty()
+// CHECK:     linalg.generic
+// CHECK-NEXT:  ^bb0(%[[LHS:[^:]*]]: complex<f32>, %[[RHS:[^:]*]]: complex<f32>
+// CHECK-DAG:     %[[LHS_REAL:.*]] = complex.re %[[LHS]]
+// CHECK-DAG:     %[[RHS_REAL:.*]] = complex.re %[[RHS]]
+// CHECK-DAG:     %[[LHS_IMAG:.*]] = complex.im %[[LHS]]
+// CHECK-DAG:     %[[RHS_IMAG:.*]] = complex.im %[[RHS]]
+// CHECK-DAG:     %[[REAL_EQ:.*]] = arith.cmpf oeq, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[REAL_ORD:.*]] = arith.cmpf oge, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[IMAG_ORD:.*]] = arith.cmpf oge, %[[LHS_IMAG]], %[[RHS_IMAG]]
+// CHECK-DAG:     %[[OR_LHS:.*]] = arith.andi %[[REAL_EQ]], %[[IMAG_ORD]]
+// CHECK-DAG:     %[[COND:.*]] = arith.ori %[[OR_LHS]], %[[REAL_ORD]]
+// CHECK:         %[[RESULT:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]]
+// CHECK-NEXT:    linalg.yield %[[RESULT]] : complex<f32>
+  %result = mhlo.maximum %a, %b : tensor<complex<f32>>
+  func.return %result : tensor<complex<f32>>
+}
+
+// -----
+
+// CHECK-LABEL: func @min_complex
+func.func @min_complex(%a: tensor<complex<f32>>, %b: tensor<complex<f32>>)
+    -> tensor<complex<f32>> {
+// CHECK-NOT: mhlo.minimum
+// CHECK:     tensor.empty()
+// CHECK:     linalg.generic
+// CHECK-NEXT:  ^bb0(%[[LHS:[^:]*]]: complex<f32>, %[[RHS:[^:]*]]: complex<f32>
+// CHECK-DAG:     %[[LHS_REAL:.*]] = complex.re %[[LHS]]
+// CHECK-DAG:     %[[RHS_REAL:.*]] = complex.re %[[RHS]]
+// CHECK-DAG:     %[[LHS_IMAG:.*]] = complex.im %[[LHS]]
+// CHECK-DAG:     %[[RHS_IMAG:.*]] = complex.im %[[RHS]]
+// CHECK-DAG:     %[[REAL_EQ:.*]] = arith.cmpf oeq, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[REAL_ORD:.*]] = arith.cmpf ole, %[[LHS_REAL]], %[[RHS_REAL]]
+// CHECK-DAG:     %[[IMAG_ORD:.*]] = arith.cmpf ole, %[[LHS_IMAG]], %[[RHS_IMAG]]
+// CHECK-DAG:     %[[OR_LHS:.*]] = arith.andi %[[REAL_EQ]], %[[IMAG_ORD]]
+// CHECK-DAG:     %[[COND:.*]] = arith.ori %[[OR_LHS]], %[[REAL_ORD]]
+// CHECK:         %[[RESULT:.*]] = arith.select %[[COND]], %[[LHS]], %[[RHS]]
+// CHECK-NEXT:    linalg.yield %[[RESULT]] : complex<f32>
+  %result = mhlo.minimum %a, %b : tensor<complex<f32>>
+  func.return %result : tensor<complex<f32>>
+}
+
+// -----
+
+// CHECK-LABEL: @clamp_complex
+func.func @clamp_complex(%min: tensor<8xcomplex<f32>>,
+      %operand: tensor<8xcomplex<f32>>, %max: tensor<8xcomplex<f32>>)
+    -> tensor<8xcomplex<f32>> {
+// CHECK-NOT: mhlo.clamp
+  %result = mhlo.clamp %min, %operand, %max : tensor<8xcomplex<f32>>
+  func.return %result : tensor<8xcomplex<f32>>
+}
