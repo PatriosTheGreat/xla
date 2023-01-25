@@ -52,6 +52,7 @@ INCLUDEPRE_RE = re.compile(r"absl::lts_[0-9]+::base_internal::ThrowStdOutOfRange
                            r"absl::lts_[0-9]+::container_internal|" # for _pywrap_tfcompile
                            r"absl::lts_[0-9]+::Cord|" # for tensorflow::Status
                            r"absl::lts_[0-9]+::Cord::DestroyCordSlow|" # for tensorflow::Status
+                           r"absl::lts_[0-9]+::cord_internal::CordzInfo::MaybeTrackCordImpl" # for tensorflow::Status
                            r"google::protobuf::internal::ExplicitlyConstructed|"
                            r"google::protobuf::internal::ArenaImpl::AllocateAligned|" # for contrib/data/_prefetching_ops
                            r"google::protobuf::internal::ArenaImpl::AddCleanup|" # for contrib/data/_prefetching_ops
