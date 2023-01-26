@@ -309,6 +309,7 @@ struct AutoShardingOption {
   }
 };
 
+// Test.
 class AutoSharding : public HloModulePass {
  public:
   explicit AutoSharding(const AutoShardingOption& option);
