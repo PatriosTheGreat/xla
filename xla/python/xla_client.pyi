@@ -100,10 +100,14 @@ def make_tpu_client() -> Client:
   ...
 
 
+def make_c_api_client(platform_name: str) -> Client:
+  ...
+
+
 def make_plugin_device_client() -> Client:
   ...
 
-def maybe_load_pjrt_plugins() -> None:
+def load_pjrt_plugin_dynamically(plugin_name: str, library_path: str) -> None:
   ...
 
 class OpMetadata:
