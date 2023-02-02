@@ -681,7 +681,8 @@ class CudnnFilterDescriptor {
         format = CUDNN_TENSOR_NHWC;
         break;
       case dnn::FilterLayout::kOutputInputYX4:
-      case dnn::FilterLayout::kOutputInputYX32: {
+      case dnn::FilterLayout::kOutputInputYX32:
+      case dnn::FilterLayout::kOutputInputYX32_Reordered: {
         auto expected_elem_ty =
             filter_descriptor.layout() == dnn::FilterLayout::kOutputInputYX4
                 ? CUDNN_DATA_INT8x4
@@ -1094,7 +1095,8 @@ cudnnDataType_t ToCudnnDataType(dnn::DataType data_type,
     return CUDNN_DATA_INT8x4;
   }
   if (data_type == dnn::DataType::kInt8 &&
-      filter_layout == dnn::FilterLayout::kOutputInputYX32) {
+      (filter_layout == dnn::FilterLayout::kOutputInputYX32 ||
+       filter_layout == dnn::FilterLayout::kOutputInputYX32_Reordered)) {
     return CUDNN_DATA_INT8x32;
   }
   return ToCudnnDataType(data_type);
@@ -3470,7 +3472,9 @@ std::tuple<int, int> GetTensorVectorSizeAndDim(
     if (filter.layout() == dnn::FilterLayout::kOutputInputYX4) {
       vector_size = 4;
       vector_dim = 1;
-    } else if (filter.layout() == dnn::FilterLayout::kOutputInputYX32) {
+    } else if (filter.layout() == dnn::FilterLayout::kOutputInputYX32 ||
+               filter.layout() ==
+                   dnn::FilterLayout::kOutputInputYX32_Reordered) {
       vector_size = 32;
       vector_dim = 1;
     }
@@ -6016,6 +6020,31 @@ tsl::Status CudnnSupport::DoFusedConvolve(
 
   return runner(stream, output_profile_result, scratch, conv_input_data,
                 filter_data, side_input_data, biases, output_data);
+}
+
+tsl::Status CudnnSupport::PrepareInputsForVectorizedConvolution(
+    Stream* stream, const dnn::FilterDescriptor& filter_descriptor,
+    const DeviceMemory<int8_t>& filter_input,
+    DeviceMemory<int8_t>* filter_output,
+    std::optional<const DeviceMemory<float>> bias_input,
+    std::optional<DeviceMemory<float>> bias_output) {
+  bool has_bias = bias_input.has_value();
+  CHECK(!has_bias || bias_output.has_value());
+
+  auto cudnn = cudnn_->GetHandle(parent_, stream);
+  CudnnFilterDescriptor filter_nd(filter_descriptor, CUDNN_DATA_INT8x32);
+
+  cudnnStatus_t status = cudnnReorderFilterAndBias(
+      /*handle=*/cudnn.handle(), /*filterDesc=*/filter_nd.handle(),
+      /*reorderType=*/CUDNN_DEFAULT_REORDER,
+      /*filterData=*/filter_input.opaque(),
+      /*reorderedFilterData=*/filter_output->opaque(),
+      /*reorderBias=*/has_bias ? 1 : 0,
+      /*biasData=*/has_bias ? bias_input->opaque() : nullptr,
+      /*reorderedBiasData=*/has_bias ? bias_output->opaque() : nullptr);
+  RETURN_IF_CUDNN_ERROR(status);
+
+  return tsl::OkStatus();
 }
 
 tsl::Status CudnnSupport::DoPrepareForCtcLoss(

@@ -123,6 +123,7 @@ StreamExecutorConvLayoutsToXlaLayouts(const ConvolutionDimensionNumbers& dnums,
       break;
     case FilterLayout::kOutputInputYX4:   // OIHW_VECT_C
     case FilterLayout::kOutputInputYX32:  // OIHW_VECT_C
+      // FilterLayout::kOutputInputYX32_Reordered should not appear here.
       filter_layout.push_back(dnums.kernel_output_feature_dimension());
       filter_layout.push_back(dnums.kernel_input_feature_dimension());
       filter_layout.insert(filter_layout.end(),

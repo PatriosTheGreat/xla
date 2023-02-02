@@ -42,6 +42,19 @@ def Activation: I32EnumAttr<"Activation",
 
 def ActivationAttr : EnumAttr<LmhloGpuDialect, Activation, "activation">;
 
+def InputLayoutDefault : I32EnumAttrCase<"Default", 0>;
+def InputLayoutReorderedInt8NchwVect :
+    I32EnumAttrCase<"ReorderedInt8NchwVect", 1>;
+
+def InputLayout: I32EnumAttr<"InputLayout",
+    "Input layout of the convolution inputs",
+    [InputLayoutDefault, InputLayoutReorderedInt8NchwVect]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = "::mlir::lmhlo_gpu";
+}
+
+def InputLayoutAttr : EnumAttr<LmhloGpuDialect, InputLayout, "input_layout">;
+
 def BoolParameter : AttrOrTypeParameter<"bool", ""> {
   let parser = "::mlir::lmhlo_gpu::parseBool($_parser)";
 }

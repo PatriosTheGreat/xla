@@ -61,7 +61,8 @@ func.func @conv_forward(%input: memref<1x4x4x1024xf16, #map1>,
       batch_group_count = 1 : i64,
       feature_group_count = 1024 : i64,
       precision_config = [],
-      result_scale = 1.000000e+00 : f64
+      result_scale = 1.000000e+00 : f64,
+      input_layout = #lmhlo_gpu<input_layout Default>
     } : (memref<1x4x4x1024xf16, #map1>,
          memref<3x3x1x1024xf16, #map0>,
          memref<1x2x2x1024xf16, #map2>,
@@ -114,7 +115,8 @@ func.func @conv_backwardfilter(%input: memref<1x3x3x5xf16, #map0>,
       batch_group_count = 1 : i64,
       feature_group_count = 1 : i64,
       precision_config = [],
-      result_scale = 1.000000e+00 : f64
+      result_scale = 1.000000e+00 : f64,
+      input_layout = #lmhlo_gpu<input_layout Default>
     } : (memref<1x3x3x5xf16, #map0>,
          memref<3x3x5x3xf16, #map1>,
          memref<1x1x1x3xf16, #map2>,
@@ -163,7 +165,8 @@ func.func @conv_backwardinput(%d_output: memref<4x5x16x16xf64>,
       batch_group_count = 1 : i64,
       feature_group_count = 1 : i64,
       precision_config = [],
-      result_scale = 1.000000e+00 : f64
+      result_scale = 1.000000e+00 : f64,
+      input_layout = #lmhlo_gpu<input_layout Default>
     } : (memref<4x5x16x16xf64>,
          memref<5x3x7x7xf64>,
          memref<4x3x16x16xf64>,
@@ -223,7 +226,8 @@ func.func @conv_forward_fused(%input: memref<8x5x5x1xf32, #map1>,
       batch_group_count = 1 : i64,
       feature_group_count = 1 : i64,
       precision_config = [],
-      result_scale = 1.000000e+00 : f64
+      result_scale = 1.000000e+00 : f64,
+      input_layout = #lmhlo_gpu<input_layout Default>
     } : (memref<8x5x5x1xf32, #map1>,
          memref<3x3x1x32xf32, #map0>,
          memref<32xf32>,
@@ -290,7 +294,8 @@ func.func @conv_forward_fused_with_side_input(
        feature_group_count = 1 : i64,
        precision_config = [],
        result_scale = 1.000000e+00 : f64,
-       side_input_scale = 1.000000e+00 : f64
+       side_input_scale = 1.000000e+00 : f64,
+       input_layout = #lmhlo_gpu<input_layout Default>
      } : (memref<1x3x3x64xf64, #map0>,
           memref<3x3x64x64xf64, #map1>,
           memref<64xf64>,

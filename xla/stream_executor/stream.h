@@ -421,6 +421,20 @@ class Stream {
     return tsl::errors::Unimplemented("DNN library is not found.");
   }
 
+  tsl::Status PrepareInputsForVectorizedConvolution(
+      const dnn::FilterDescriptor &filter_descriptor,
+      const DeviceMemory<int8_t> &filter_input,
+      DeviceMemory<int8_t> *filter_output,
+      std::optional<const DeviceMemory<float>> bias_input,
+      std::optional<DeviceMemory<float>> bias_output) {
+    if (dnn::DnnSupport *dnn = parent_->AsDnn()) {
+      return dnn->PrepareInputsForVectorizedConvolution(
+          this, filter_descriptor, filter_input, filter_output,
+          std::move(bias_input), std::move(bias_output));
+    }
+    return tsl::errors::Unimplemented("DNN library is not found.");
+  }
+
   tsl::StatusOr<std::unique_ptr<const dnn::ConvRunner>> ConvolveRunnerFromDesc(
       const dnn::AlgorithmDesc &algorithm_desc, dnn::ConvolutionKind kind,
       dnn::DataType element_type, dnn::DataType output_type,
