@@ -681,7 +681,8 @@ class CudnnFilterDescriptor {
         format = CUDNN_TENSOR_NHWC;
         break;
       case dnn::FilterLayout::kOutputInputYX4:
-      case dnn::FilterLayout::kOutputInputYX32: {
+      case dnn::FilterLayout::kOutputInputYX32:
+      case dnn::FilterLayout::kOutputInputYX32_CudnnReordered: {
         auto expected_elem_ty =
             filter_descriptor.layout() == dnn::FilterLayout::kOutputInputYX4
                 ? CUDNN_DATA_INT8x4
@@ -1094,7 +1095,8 @@ cudnnDataType_t ToCudnnDataType(dnn::DataType data_type,
     return CUDNN_DATA_INT8x4;
   }
   if (data_type == dnn::DataType::kInt8 &&
-      filter_layout == dnn::FilterLayout::kOutputInputYX32) {
+      (filter_layout == dnn::FilterLayout::kOutputInputYX32 ||
+       filter_layout == dnn::FilterLayout::kOutputInputYX32_CudnnReordered)) {
     return CUDNN_DATA_INT8x32;
   }
   return ToCudnnDataType(data_type);
@@ -3470,7 +3472,9 @@ std::tuple<int, int> GetTensorVectorSizeAndDim(
     if (filter.layout() == dnn::FilterLayout::kOutputInputYX4) {
       vector_size = 4;
       vector_dim = 1;
-    } else if (filter.layout() == dnn::FilterLayout::kOutputInputYX32) {
+    } else if (filter.layout() == dnn::FilterLayout::kOutputInputYX32 ||
+               filter.layout() ==
+                   dnn::FilterLayout::kOutputInputYX32_CudnnReordered) {
       vector_size = 32;
       vector_dim = 1;
     }
@@ -3481,7 +3485,7 @@ std::tuple<int, int> GetTensorVectorSizeAndDim(
 tsl::StatusOr<cudnn_frontend::Tensor> CreateCudnnTensor(
     absl::Span<const int64_t> dims, absl::Span<const int64_t> strides,
     int64_t uid, dnn::DataType dtype, int64_t vec_count, int64_t vec_dim,
-    bool is_virtual = false) {
+    bool is_virtual = false, bool is_reordered_nchw_vect = false) {
   auto tensor = cudnn_frontend::TensorBuilder()
                     .setDim(dims.size(), dims.data())
                     .setStride(strides.size(), strides.data())
@@ -3490,6 +3494,9 @@ tsl::StatusOr<cudnn_frontend::Tensor> CreateCudnnTensor(
                     .setDataType(ToCudnnDataType(dtype))
                     .setVectorCountAndDimension(vec_count, vec_dim)
                     .setVirtual(is_virtual)
+                    .setReorderType(is_reordered_nchw_vect
+                                        ? CUDNN_TENSOR_REORDERING_INT8x32
+                                        : CUDNN_TENSOR_REORDERING_NONE)
                     .build();
   RETURN_MSG_IF_CUDNN_ERROR(tensor);
   return tensor;
@@ -3516,11 +3523,6 @@ GetCudnnOperationGraph(dnn::ConvolutionKind kind, dnn::DataType input_type,
   std::vector<int64_t> input_strides = input_descriptor.vectorized_strides(
       dnn::DataLayout::kBatchDepthYX, vector_size, vector_dim);
 
-  if (vector_size == 32) {
-    return tsl::errors::Internal(
-        "cuDNN frontend doesn't support Tx32 at the moment.");
-  }
-
   TF_ASSIGN_OR_RETURN(auto tensor_x,
                       CreateCudnnTensor(input_dims, input_strides, 'x',
                                         input_type, vector_size, vector_dim));
@@ -3545,9 +3547,13 @@ GetCudnnOperationGraph(dnn::ConvolutionKind kind, dnn::DataType input_type,
   std::vector<int64_t> filter_strides = filter_descriptor.vectorized_strides(
       dnn::FilterLayout::kOutputInputYX, vector_size, vector_dim);
 
-  TF_ASSIGN_OR_RETURN(auto tensor_w,
-                      CreateCudnnTensor(filter_dims, filter_strides, 'w',
-                                        input_type, vector_size, vector_dim));
+  TF_ASSIGN_OR_RETURN(
+      auto tensor_w,
+      CreateCudnnTensor(
+          filter_dims, filter_strides, 'w', input_type, vector_size, vector_dim,
+          /*is_virtual=*/false,
+          /*is_reordered_nchw_vect=*/filter_descriptor.layout() ==
+              dnn::FilterLayout::kOutputInputYX32_CudnnReordered));
 
   // conv_desc.
   auto mode = convolution_descriptor.convolution_not_crosscorr()
@@ -3651,11 +3657,6 @@ GetCudnnFusedOperationGraph(
   std::vector<int64_t> input_strides = input_descriptor.vectorized_strides(
       dnn::DataLayout::kBatchDepthYX, vector_size, vector_dim);
 
-  if (vector_size == 32) {
-    return tsl::errors::Internal(
-        "cuDNN frontend doesn't support Tx32 at the moment.");
-  }
-
   TF_ASSIGN_OR_RETURN(auto tensor_x,
                       CreateCudnnTensor(input_dims, input_strides, 'x',
                                         input_type, vector_size, vector_dim));
@@ -3680,9 +3681,13 @@ GetCudnnFusedOperationGraph(
       dnn::FilterLayout::kOutputInputYX, vector_size, vector_dim);
   std::vector<int64_t> filter_strides = filter_descriptor.vectorized_strides(
       dnn::FilterLayout::kOutputInputYX, vector_size, vector_dim);
-  TF_ASSIGN_OR_RETURN(auto tensor_w,
-                      CreateCudnnTensor(filter_dims, filter_strides, 'w',
-                                        input_type, vector_size, vector_dim));
+  TF_ASSIGN_OR_RETURN(
+      auto tensor_w,
+      CreateCudnnTensor(
+          filter_dims, filter_strides, 'w', input_type, vector_size, vector_dim,
+          /*is_virtual=*/false,
+          /*is_reordered_nchw_vect=*/filter_descriptor.layout() ==
+              dnn::FilterLayout::kOutputInputYX32_CudnnReordered));
 
   // For the purposes of the cudnn graph, say that the bias tensor has the same
   // layout as the output tensor.  It doesn't actually matter, because bias is a
@@ -4925,6 +4930,12 @@ CudnnSupport::ConvolveRunnerFromDesc(
         ToCudnnDataType(GetConvAccumulatorType(input_type)));
     conv.set_use_tensor_op_math(algorithm_desc.tensor_ops_enabled());
 
+    if (filter_descriptor.layout() ==
+        dnn::FilterLayout::kOutputInputYX32_CudnnReordered) {
+      CHECK_CUDNN_OK(
+          cudnnSetConvolutionReorderType(conv.handle(), CUDNN_NO_REORDER));
+    }
+
     TF_ASSIGN_OR_RETURN(
         auto runner,
         CudnnLegacyConvRunner::Create(
@@ -5185,6 +5196,12 @@ CudnnSupport::FusedConvolveRunnerFromDesc(
         convolution_descriptor,
         ToCudnnDataType(GetConvAccumulatorType(input_type)));
     conv.set_use_tensor_op_math(algorithm_desc.tensor_ops_enabled());
+
+    if (filter_descriptor.layout() ==
+        dnn::FilterLayout::kOutputInputYX32_CudnnReordered) {
+      CHECK_CUDNN_OK(
+          cudnnSetConvolutionReorderType(conv.handle(), CUDNN_NO_REORDER));
+    }
 
     // CUDNN v6 only supports CUDNN_NOT_PROPAGATE_NAN as the reluNanOpt for
     // activation descriptor. Note that this will change the nan propagation
@@ -6016,6 +6033,31 @@ tsl::Status CudnnSupport::DoFusedConvolve(
 
   return runner(stream, output_profile_result, scratch, conv_input_data,
                 filter_data, side_input_data, biases, output_data);
+}
+
+tsl::Status CudnnSupport::CudnnReorderConvolutionFilterAndBias(
+    Stream* stream, const dnn::FilterDescriptor& filter_descriptor,
+    const DeviceMemory<int8_t>& filter_input,
+    DeviceMemory<int8_t>* filter_output,
+    std::optional<const DeviceMemory<float>> bias_input,
+    std::optional<DeviceMemory<float>> bias_output) {
+  bool has_bias = bias_input.has_value();
+  CHECK(!has_bias || bias_output.has_value());
+
+  auto cudnn = cudnn_->GetHandle(parent_, stream);
+  CudnnFilterDescriptor filter_nd(filter_descriptor, CUDNN_DATA_INT8x32);
+
+  cudnnStatus_t status = cudnnReorderFilterAndBias(
+      /*handle=*/cudnn.handle(), /*filterDesc=*/filter_nd.handle(),
+      /*reorderType=*/CUDNN_DEFAULT_REORDER,
+      /*filterData=*/filter_input.opaque(),
+      /*reorderedFilterData=*/filter_output->opaque(),
+      /*reorderBias=*/has_bias ? 1 : 0,
+      /*biasData=*/has_bias ? bias_input->opaque() : nullptr,
+      /*reorderedBiasData=*/has_bias ? bias_output->opaque() : nullptr);
+  RETURN_IF_CUDNN_ERROR(status);
+
+  return tsl::OkStatus();
 }
 
 tsl::Status CudnnSupport::DoPrepareForCtcLoss(
