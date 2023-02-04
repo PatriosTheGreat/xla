@@ -108,4 +108,22 @@ def RemoveCopiesToOutParamsPass :
   let constructor = "createRemoveCopiesToOutParamsPass()";
 }
 
+def SparseCustomCallToPackPass :
+    Pass<"xla-sparse-custom-call-to-pack", "mlir::func::FuncOp"> {
+  let summary = "Convers layouts and data formats at ABI boundaries";
+
+  let description = [{
+      Converts layouts defined in entry_computation_layout to the default
+      layout assumed by the MLIR pipeline. The same is done for custom calls.
+
+      This pass should run immediately after expand-hlo-tuples.
+  }];
+
+  let dependentDialects = [
+      "mlir::sparse_tensor::SparseTensorDialect"
+  ];
+
+  let constructor = "createSparseCustomCallToPackUnpackOpPass()";
+}
+
 #endif  // TENSORFLOW_COMPILER_XLA_MLIR_TRANSFORMS_CPU_PASSES_TD_
