@@ -2839,12 +2839,13 @@ LogicalResult ConvertToHloModule::RunOnFunction(mlir::func::FuncOp f) {
     if (auto pr =
             f.getArgAttrOfType<mlir::ArrayAttr>(i, kParameterReplicationAttr))
       for (auto b : pr.getValue())
-        computation.mutable_proto()
-            ->mutable_computations(0)
-            ->mutable_instructions(i)
-            ->mutable_parameter_replication()
-            ->add_replicated_at_leaf_buffers(
-                b.cast<mlir::BoolAttr>().getValue());
+        for (auto& instr : *computation.mutable_proto()
+                                ->mutable_computations(0)
+                                ->mutable_instructions())
+          if (instr.parameter_number() == i)
+            instr.mutable_parameter_replication()
+                ->add_replicated_at_leaf_buffers(
+                    b.cast<mlir::BoolAttr>().getValue());
   lowered_computation_[f] = std::move(computation);
   return success();
 }
