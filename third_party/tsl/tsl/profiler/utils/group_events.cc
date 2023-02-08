@@ -24,6 +24,7 @@ limitations under the License.
 #include <optional>
 #include <queue>
 #include <string>
+#include <thread>  // NOLINT(build/c++11)
 #include <utility>
 #include <vector>
 
@@ -32,7 +33,6 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "tsl/lib/gtl/map_util.h"
 #include "tsl/platform/types.h"
-#include "tsl/profiler/lib/context_types.h"
 #include "tsl/profiler/utils/tf_xplane_visitor.h"
 #include "tsl/profiler/utils/xplane_builder.h"
 #include "tsl/profiler/utils/xplane_schema.h"
@@ -925,8 +925,15 @@ void GroupTpuEventsOSS(
   const GroupMetadataMap& group_metadata_map =
       event_forest->GetGroupMetadataMap();
 
+  std::vector<std::thread> threads;
+  threads.reserve(device_traces.size());
   for (XPlane* plane : device_traces) {
-    GroupXplaneEvents(plane, group_metadata_map);
+    threads.push_back(
+        std::thread(GroupXplaneEvents, plane, group_metadata_map));
+  }
+
+  for (auto& th : threads) {
+    th.join();
   }
 }
 
